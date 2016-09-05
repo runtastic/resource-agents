@@ -1,0 +1,181 @@
+#!/bin/bash
+#
+# private-chef-runsvdir
+#
+# Description:  Starts a runsvdir instance for Opscode Chef Server 12
+#
+# Author:       Andreas Kurz
+#
+# License:      GNU General Public License (GPL)
+#
+# (c) 2016 runtastic GmbH
+#
+# See usage() function below for more details ...
+#
+# OCF parameters:
+#   OCF_RESKEY_runsvdir_start_binary
+#   OCF_RESKEY_private_chef_ctl_binary
+#
+#######################################################################
+# Initialization:
+: ${OCF_FUNCTIONS_DIR=${OCF_ROOT}/lib/heartbeat}
+. ${OCF_FUNCTIONS_DIR}/ocf-shellfuncs
+: ${__OCF_ACTION=$1}
+
+# Defaults
+# Set the default path for "runsvdir-start" and "private-chef-ctl" 
+OCF_RESKEY_runsvdir_start_binary_default="/opt/opscode/embedded/bin/runsvdir-start"
+: ${OCF_RESKEY_runsvdir_start_binary=${OCF_RESKEY_runsvdir_start_binary_default}}
+OCF_RESKEY_private_chef_ctl_binary_default="/usr/bin/private-chef-ctl"
+: ${OCF_RESKEY_private_chef_ctl_binary=${OCF_RESKEY_private_chef_ctl_binary_default}}
+
+#######################################################################
+
+meta_data() {
+	cat <<END
+<?xml version="1.0"?>
+<!DOCTYPE resource-agent SYSTEM "ra-api-1.dtd">
+<resource-agent name="private-chef-runsvdir" version="0.1">
+<version>0.1</version>
+
+<longdesc lang="en">
+This is an Resource Agent that "emulates" the upstart initiated private-chef-runsvdir
+script.
+</longdesc>
+<shortdesc lang="en">private-chef-runsvdir resource agent</shortdesc>
+
+<parameters>
+<parameter name="runsvdir-start_binary" unique="0" required="0">
+<longdesc lang="en">
+The full path to the "private-chef-runsvdir" binary.
+</longdesc>
+<shortdesc lang="en">private-chef-runsvdir binary</shortdesc>
+<content type="string" default="${OCF_RESKEY_runsvdir_start_binary_default}" />
+</parameter>
+<parameter name="private-chef-ctl_binary" unique="0" required="0">
+<longdesc lang="en">
+The full path to the "private-chef-ctl" binary.
+</longdesc>
+<shortdesc lang="en">private-chef-ctl binary</shortdesc>
+<content type="string" default="${OCF_RESKEY_private_chef_ctl_binary_default}" />
+</parameter>
+</parameters>
+
+<actions>
+<action name="start"        timeout="20" />
+<action name="stop"         timeout="180" />
+<action name="monitor"      timeout="20" interval="10" depth="0" />
+<action name="meta-data"    timeout="5" />
+<action name="validate-all" timeout="20" />
+</actions>
+</resource-agent>
+END
+}
+
+#######################################################################
+
+runsvdir_usage() {
+	cat <<END
+usage: $0 {start|stop|monitor|validate-all|meta-data}
+
+Expects to have a fully populated OCF RA-compliant environment set.
+END
+}
+
+runsvdir_start() {
+    runsvdir_monitor
+    if [ $? =  $OCF_SUCCESS ]; then
+	      return $OCF_SUCCESS
+    fi
+
+    ( setsid $OCF_RESKEY_runsvdir_start_binary & )
+    # OK - give the services some time to start and check if runsvdir
+    # is really running
+    sleep 20
+    runsvdir_monitor || {
+       ocf_log err "Unable to start runsvdir - used binary \"$OCF_RESKEY_runsvdir_start_binary\".";
+       return $OCF_ERR_GENERIC
+    }
+
+    return $OCF_SUCCESS
+}
+
+runsvdir_stop() {
+
+    runsvdir_monitor || return $OCF_SUCCESS
+
+    # First stopping all Chef Server services
+    ocf_run $OCF_RESKEY_private_chef_ctl_binary stop || {
+       ocf_log err "Unable to stop Chef services - used binary \"$OCF_RESKEY_private_chef_ctl_binaryr\".";
+       return $OCF_ERR_GENERIC
+    }
+
+    # Chef Server is stopped - now stop runsvdir
+    ocf_run pkill -TERM -f "^runsvdir -P /opt/opscode/service log: ..."
+    case $? in
+      0) : 
+        ;;
+      1) ocf_log warn "No process matched the pattern \"^runsvdir -P /opt/opscode/service log: ...\"."
+        ;;
+      *) return $OCF_ERR_GENERIC
+        ;; 
+    esac
+   
+    # From the upstart script:
+    # To avoid stomping on runsv's owned by a different runsvdir
+		# process, kill any runsv process that has been orphaned, and is
+		# now owned by init (process 1).
+		pkill -HUP -P 1 '^runsv$'
+
+    return $OCF_SUCCESS
+}
+
+runsvdir_monitor() {
+
+    # Check for the process
+    pgrep -f "^runsvdir -P /opt/opscode/service log: ..." && {
+        ocf_log debug "Found \"^runsvdir -P /opt/opscode/service log: ...\" in process list.";
+        return $OCF_SUCCESS
+    }
+
+    return $OCF_NOT_RUNNING
+}
+
+runsvdir_validate() {
+    local binary
+    
+    # Are all binaries available?
+    for binary in pgrep pkill ${OCF_RESKEY_runsvdir_start_binary} ${OCF_RESKEY_private_chef_ctl_binary}; do
+        check_binary $binary
+    done
+
+    return $OCF_SUCCESS
+}
+
+case $1 in
+    meta-data)
+        meta_data
+        exit $OCF_SUCCESS
+        ;;
+    usage|help)
+        SCSTTarget_usage
+        exit $OCF_SUCCESS
+        ;;
+esac
+
+# Everything except usage and meta-data must pass the validate test
+runsvdir_validate
+
+case $__OCF_ACTION in
+    start)		runsvdir_start;;
+    stop)		runsvdir_stop;;
+    monitor)	runsvdir_monitor;;
+    validate-all)	runsvdir_validate;;
+    *)		runsvdir_usage
+		exit $OCF_ERR_UNIMPLEMENTED
+		;;
+esac
+rc=$?
+ocf_log debug "${OCF_RESOURCE_INSTANCE} $__OCF_ACTION : $rc"
+exit $rc
+
