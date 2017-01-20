@@ -1,0 +1,352 @@
+#!/bin/bash
+#
+# DynamoDB
+#
+# Description:  Starts a local DynamoDB instance and allows remote connections
+#               For inital installation of DynamoDB see:
+#               http://docs.aws.amazon.com/amazondynamodb/latest/developerguide/DynamoDBLocal.html
+#
+# Author:       Andreas Kurz <andreas.kurz@runtastic.com>
+#
+# License:      GNU General Public License (GPL)
+#
+# (c) 2017 runtastic GmbH
+#
+# See usage() function below for more details ...
+#
+# OCF parameters:
+#   OCF_RESKEY_dynamodb_deployment_dir
+#   OCF_RESKEY_dynamodb_data_dir
+#   OCF_RESKEY_dynamodb_java_bin
+#   OCF_RESKEY_dynamodb_ip
+#   OCF_RESKEY_dynamodb_port
+#   OCF_RESKEY_dynamodb_options
+#   OCF_RESKEY_dynamodb_user
+#
+#######################################################################
+# Initialization:
+: ${OCF_FUNCTIONS_DIR=${OCF_ROOT}/lib/heartbeat}
+. ${OCF_FUNCTIONS_DIR}/ocf-shellfuncs
+: ${__OCF_ACTION=$1}
+
+# Defaults
+OCF_RESKEY_dynamodb_deployment_dir_default="/opt/dynamodb"
+: ${OCF_RESKEY_dynamodb_deployment_dir=${OCF_RESKEY_dynamodb_deployment_dir_default}}
+OCF_RESKEY_dynamodb_data_dir_default="/opt/dynamodb/data"
+: ${OCF_RESKEY_dynamodb_data_dir=${OCF_RESKEY_dynamodb_data_dir_default}}
+OCF_RESKEY_dynamodb_java_bin_default="/usr/bin/java"
+: ${OCF_RESKEY_dynamodb_java_bin=${OCF_RESKEY_dynamodb_java_bin_default}}
+OCF_RESKEY_dynamodb_port_default=8000
+: ${OCF_RESKEY_dynamodb_port=${OCF_RESKEY_dynamodb_port_default}}
+OCF_RESKEY_dynamodb_ip_default="0.0.0.0"
+: ${OCF_RESKEY_dynamodb_ip=${OCF_RESKEY_dynamodb_ip_default}}
+OCF_RESKEY_dynamodb_user_default="root"
+: ${OCF_RESKEY_dynamodb_user=${OCF_RESKEY_dynamodb_user_default}}
+
+# For convenience
+dynamodbcmd="${OCF_RESKEY_dynamodb_java_bin} -Djava.library.path=${OCF_RESKEY_dynamodb_deployment_dir} -jar ${OCF_RESKEY_dynamodb_deployment_dir}/DynamoDBLocal.jar -dbPath ${OCF_RESKEY_dynamodb_data_dir} -port $(( OCF_RESKEY_dynamodb_port + 1 ))"
+socatcmd="socat TCP-LISTEN:${OCF_RESKEY_dynamodb_port},bind=${OCF_RESKEY_dynamodb_ip},fork,reuseaddr,su=${OCF_RESKEY_dynamodb_user} TCP:localhost:$(( OCF_RESKEY_dynamodb_port + 1 ))"
+
+#######################################################################
+
+meta_data() {
+  cat <<END
+<?xml version="1.0"?>
+<!DOCTYPE resource-agent SYSTEM "ra-api-1.dtd">
+<resource-agent name="DynamoDB" version="0.1">
+<version>0.1</version>
+
+<longdesc lang="en">
+This is an Resource Agent that manages a local DynamoDB instance and
+allows remote connections to it whith the help of socat.
+</longdesc>
+<shortdesc lang="en">DynamoDB resource agent</shortdesc>
+
+<parameters>
+<parameter name="dynamodb_deployment_dir" unique="0" required="0">
+<longdesc lang="en">
+The directory where the DynamoDB jar and its libraries are deployed.
+</longdesc>
+<shortdesc lang="en">DynamoDB deployment directory</shortdesc>
+<content type="string" default="${OCF_RESKEY_dynamodb_deployment_dir_default}" />
+</parameter>
+
+<parameter name="dynamodb_data_dir" unique="0" required="0">
+<longdesc lang="en">
+The directory where the DynamoDB database files are stored.
+</longdesc>
+<shortdesc lang="en">DynamoDB data directory</shortdesc>
+<content type="string" default="${OCF_RESKEY_dynamodb_data_dir_default}" />
+</parameter>
+
+<parameter name="dynamodb_java_bin" unique="0" required="0">
+<longdesc lang="en">
+The full file system path to the Java binary to use.
+</longdesc>
+<shortdesc lang="en">Java binary path</shortdesc>
+<content type="string" default="${OCF_RESKEY_dynamodb_java_bin_default}" />
+</parameter>
+
+<parameter name="dynamodb_port" unique="0" required="0">
+<longdesc lang="en">
+The network port where DynamoDB is listening on the bind IP. This port+1 must
+also be free to bind on localhost.
+</longdesc>
+<shortdesc lang="en">DynamoDB network port</shortdesc>
+<content type="integer" default="${OCF_RESKEY_dynamodb_port_default}" />
+</parameter>
+
+<parameter name="dynamodb_ip" unique="0" required="0">
+<longdesc lang="en">
+The IP address where the DynamoDB should bind. This address must be
+already available.
+</longdesc>
+<shortdesc lang="en">DynamoDB bind IP</shortdesc>
+<content type="string" default="${OCF_RESKEY_dynamodb_ip_default}" />
+</parameter>
+
+<parameter name="dynamodb_options" unique="0" required="0">
+<longdesc lang="en">
+The DynamoDB start-options to use.
+</longdesc>
+<shortdesc lang="en">DynamoDB options</shortdesc>
+<content type="string" default="" />
+</parameter>
+
+<parameter name="dynamodb_user" unique="0" required="0">
+<longdesc lang="en">
+The system user to use when starting DynamoDB.
+</longdesc>
+<shortdesc lang="en">DynamoDB system user</shortdesc>
+<content type="string" default="${OCF_RESKEY_dynamodb_user_default}" />
+</parameter>
+</parameters>
+
+<actions>
+<action name="start"        timeout="20" />
+<action name="stop"         timeout="180" />
+<action name="monitor"      timeout="20" interval="10" depth="0" />
+<action name="meta-data"    timeout="5" />
+<action name="validate-all" timeout="20" />
+</actions>
+</resource-agent>
+END
+}
+
+#######################################################################
+
+# This helper function accepts up to three parameter:
+# $1 - check|kill
+# $2 - <command to grep>
+# $3 - <signal to use>
+# The latter is only used when killing processes.
+check_or_kill() {
+    local rc
+
+    # Try to check/kill the process
+    case "$1" in
+        check)
+              ocf_run -q pgrep -f -- "${2}"
+              rc=$?
+              ;;
+        kill)
+              ocf_run -q pkill --signal "${3}" -f -- "${2}"
+              rc=$?
+              ;;
+    esac
+
+    # Check the result
+    case $rc in
+        0)
+            ocf_log debug "${1}: Found \"${2}\" in process list."
+            return "$OCF_SUCCESS"
+            ;;
+        1)
+            ocf_log debug "${1}: Unable to find \"${2}\" in process list."
+            return "$OCF_NOT_RUNNING"
+            ;;
+        *)
+            # Something is really wrong - exit immediately
+            ocf_log err "${1}: Received \"${rc}\" for process \"${2}\"."
+            exit "$OCF_ERR_GENERIC"
+            ;;
+    esac
+}
+
+dynamodb_usage() {
+  cat <<END
+usage: $0 {start|stop|monitor|validate-all|meta-data}
+
+Expects to have a fully populated OCF RA-compliant environment set.
+END
+}
+
+dynamodb_start() {
+    local cmd
+
+    dynamodb_monitor && return "$OCF_SUCCESS"
+
+    cmd="${dynamodbcmd} ${OCF_RESKEY_dynamodb_options} &"
+    # Use sudo for all but root user and
+    # make sure the file rights are correct.
+    if [ "$OCF_RESKEY_dynamodb_user" != "root" ]; then
+        cmd="su - -s /bin/sh ${OCF_RESKEY_dynamodb_user} -c '${cmd} &'"
+        ocf_run -q chown --dereference -L -R \
+            "${OCF_RESKEY_dynamodb_user}" \
+            "${OCF_RESKEY_dynamodb_deployment_dir}" \
+            "${OCF_RESKEY_dynamodb_data_dir}"
+    fi
+
+    # Start DynamoDB in the background ... if needed
+    check_or_kill check "${dynamodbcmd}" || eval $cmd
+    # Start socat in the background ... if needed
+    cmd="${socatcmd} &"
+    check_or_kill check "${socatcmd}" || eval $cmd
+
+    while true; do
+        dynamodb_monitor && break
+        ocf_log info "Waiting for DynamodDB instance [$RESOURCE_NAME] to start ..."
+        sleep 3
+    done
+
+    # Start
+
+    return "$OCF_SUCCESS"
+}
+
+dynamodb_stop() {
+    local shutdown_timeout
+    local procs
+
+    dynamodb_monitor || return "$OCF_SUCCESS"
+
+    # First try a gracefull stop of DynamoDB then of
+    # socat
+    for procs in ${dynamodbcmd} ${socatcmd}; do
+        check_or_kill kill "${procs}" SIGTERM
+        case $? in
+            $OCF_NOT_RUNNING|$OCF_SUCCESS) :
+                ;;
+            *)  return "$OCF_ERR_GENERIC"
+                ;;
+        esac
+    done
+
+    shutdown_timeout=$(( NOW + (OCF_RESKEY_CRM_meta_timeout/1000) -5 ))
+    # Loop on monitor until we reach $shutdown_timeout
+    while [ $NOW -lt $shutdown_timeout ]; do
+        dynamodb_monitor
+        status=$?
+        case $status in
+            $OCF_NOT_RUNNING)
+                # This was a graceful shutdown.
+                return "$OCF_SUCCESS"
+                ;;
+            $OCF_SUCCESS)
+                # DynamoDB or socat is still running, keep
+                # waiting (until shutdown_timeout
+                # expires)
+                sleep 1
+                ;;
+            *)
+                # Something went wrong. Bail out and
+                # resort to forced stop (destroy).
+                break
+                ;;
+        esac
+        NOW=$(date +%s)
+    done
+
+    # OK. Now if the above graceful shutdown hasn't worked, kill
+    # off the DynamoDB and socat. If that too does not work,
+    # have the LRM time us out.
+    for procs in ${dynamodbcmd} ${socatcmd}; do
+        check_or_kill kill "${procs}" SIGKILL
+        case $? in
+            $OCF_NOT_RUNNING|$OCF_SUCCESS) :
+                ;;
+            *)  return "$OCF_ERR_GENERIC"
+                ;;
+        esac
+    done
+
+    # One more check to be sure ....
+    sleep 1
+    dynamodb_monitor || return "$OCF_SUCCESS"
+
+    ocf_exit_reason "Unable to forcefully kill DynamoDB instance."
+    return "$OCF_ERR_GENERIC"
+}
+
+dynamodb_monitor() {
+    # Check for DynamoDB
+    check_or_kill check "${dynamodbcmd}" || return "$OCF_NOT_RUNNING"
+    # OK ... DynamoDB is up, check for socat
+    check_or_kill check "${socatcmd}" || return "$OCF_NOT_RUNNING"
+
+    # Final check: connect to the service
+    curl -q -s http://${OCF_RESKEY_dynamodb_ip}:${OCF_RESKEY_dynamodb_port}/ | \
+        grep -E 'com.amazonaws.dynamodb.v[0-9]+#MissingAuthenticationToken' || \
+        return "$OCF_NOT_RUNNING"
+
+    return "$OCF_SUCCESS"
+}
+
+dynamodb_validate() {
+    local binary
+    local dir
+
+    # Are all binaries available?
+    for binary in pgrep pkill socat curl grep $OCF_RESKEY_dynamodb_java_bin; do
+        check_binary "$binary"
+    done
+
+    # Are all directories available?
+    for dir in $OCF_RESKEY_dynamodb_data_dir $OCF_RESKEY_dynamodb_deployment_dir; do
+        if [ ! -d "$dir" ]; then
+            if ocf_is_probe; then
+                ocf_log info "Directory \"$dir\" does not exist during probe."
+            else
+                ocf_exit_reason "Directory \"$dir\" does not exist!"
+                return "$OCF_ERR_INSTALLED"
+            fi
+        fi
+    done
+
+    getent passwd "$OCF_RESKEY_dynamodb_user" >/dev/null 2>&1
+    if [ ! $? -eq 0 ]; then
+        ocf_exit_reason "User \"$OCF_RESKEY_dynamodb_user\" doesn't exit"
+        return "$OCF_ERR_INSTALLED"
+    fi
+
+    return "$OCF_SUCCESS"
+}
+
+case $1 in
+    meta-data)
+        meta_data
+        exit "$OCF_SUCCESS"
+        ;;
+    usage|help)
+        SCSTTarget_usage
+        exit "$OCF_SUCCESS"
+        ;;
+esac
+
+# Everything except usage and meta-data must pass the validate test
+dynamodb_validate
+
+case $__OCF_ACTION in
+    start) dynamodb_start;;
+    stop) dynamodb_stop;;
+    monitor) dynamodb_monitor;;
+    validate-all) dynamodb_validate;;
+    *)    dynamodb_usage
+    exit "$OCF_ERR_UNIMPLEMENTED"
+    ;;
+esac
+rc=$?
+ocf_log debug "${OCF_RESOURCE_INSTANCE} $__OCF_ACTION : $rc"
+exit $rc
+#
+# vim:tabstop=4:shiftwidth=4:textwidth=0:wrapmargin=0
